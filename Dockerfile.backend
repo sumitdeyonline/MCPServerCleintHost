@@ -1,0 +1,18 @@
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+
+WORKDIR /app
+# Copy dependency files
+COPY pyproject.toml uv.lock ./
+
+# Install project dependencies system-wide within the container using uv
+RUN uv sync --frozen || uv pip install -r pyproject.toml --system
+
+# Copy code
+COPY . .
+
+# Google Cloud Run injects the PORT env variable automatically
+ENV PORT=8000
+EXPOSE $PORT
+
+# Run the FastMCP server
+CMD ["uv", "run", "python", "src/server.py"]
