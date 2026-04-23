@@ -16,13 +16,14 @@ SSE_URL = os.getenv("SSE_URL", "http://127.0.0.1:8000/sse")
 st.set_page_config(page_title="Retail AI Agent", page_icon="🤖")
 st.title("🛒 Agentic Retail Assistant")
 
-# Basic auth check
-if not os.getenv("OPENAI_API_KEY"):
+# Basic auth check and strip trailing newlines (often caused by copy-pasting into terminal)
+raw_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+if not raw_api_key:
     st.error("Missing OPENAI_API_KEY in your .env file! Please add it and refresh.")
     st.stop()
 
-# Initialize OpenAI Client
-aclient = AsyncOpenAI()
+# Initialize OpenAI Client explicitly with the cleaned key
+aclient = AsyncOpenAI(api_key=raw_api_key)
 
 # Initialize Chat Memory
 if "messages" not in st.session_state:
@@ -88,8 +89,8 @@ async def display_and_process_prompt(prompt: str):
                     # Save AI state to conversational history
                     st.session_state.messages.append(response_message.model_dump(exclude_none=True))
 
-                    # 3. Handle Tool Executions
-                    if response_message.tool_calls:
+                    # 3. Handle Tool Executions natively supporting recursive parallel actions
+                    while response_message.tool_calls:
                         for tool_call in response_message.tool_calls:
                             tool_name = tool_call.function.name
                             tool_args = json.loads(tool_call.function.arguments)
@@ -99,37 +100,40 @@ async def display_and_process_prompt(prompt: str):
                             # Dispatch execution to the MCP Backend using SSE remotely
                             result = await session.call_tool(tool_name, arguments=tool_args)
                             
-                            # Parse result content
-                            tool_output_val = result.content[0].text if result.content else "Success"
+                            # Parse result content intelligently tracking MCP internal syntax structures
+                            tool_output_val = "Success"
+                            if result.isError:
+                                tool_output_val = f"Error: {result.content}"
+                            elif result.content:
+                                tool_output_val = result.content[0].text if hasattr(result.content[0], 'text') else str(result.content)
                             
-                            # Append tool response
+                            # Append tool response perfectly formatted for GPT-4 rules
                             st.session_state.messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call.id,
                                 "name": tool_name,
-                                "content": tool_output_val
+                                "content": str(tool_output_val)
                             })
 
                         # Immediately re-query OpenAI passing along the results of the tool execution
-                        with st.spinner("Synthesizing final answer from database response..."):
-                            final_completion = await aclient.chat.completions.create(
+                        with st.spinner("Synthesizing answer from database response..."):
+                            completion = await aclient.chat.completions.create(
                                 model="gpt-4o",
                                 messages=st.session_state.messages,
                                 tools=openai_formatted_tools
                             )
-                            final_msg = final_completion.choices[0].message
-                            st.session_state.messages.append(final_msg.model_dump(exclude_none=True))
-                            
-                            if final_msg.content:
-                                response_placeholder.markdown(final_msg.content)
-                    else:
-                        # Direct response with no tools invoked
-                        if response_message.content:
-                            response_placeholder.markdown(response_message.content)
+                            response_message = completion.choices[0].message
+                            st.session_state.messages.append(response_message.model_dump(exclude_none=True))
+
+                    # Direct response finalized output
+                    if response_message.content:
+                        response_placeholder.markdown(response_message.content)
                             
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         st.error(f"⚠️ Communication Error with MCP Backend or OpenAI: {str(e)}")
-        st.caption("Make sure `uv run python src/server.py` is running in another terminal tab!")
+        st.caption("Review your terminal logs for the deep Python stacktrace.")
 
 
 # Streamlit Execution Loop Trigger
